@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Cinematic Script Prompter - Remote Camera Sync</title>
+  
+  <!-- Tailwind CSS, React y Babel -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- PeerJS para Conexión WebRTC -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <!-- QRCode.js para Generación Automática de QR -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Courier+Prime:ital,wght@0,400;0,700;1,400&family=Montserrat:wght@700;900&family=Rokkitt:wght@400;600;800&family=Special+Elite&family=VT323&display=swap" rel="stylesheet">
+
+  <style>
+    .font-jmh { font-family: 'Special Elite', monospace; }
+    .font-typo-slab { font-family: 'Rokkitt', serif; letter-spacing: 0.02em; }
+    .font-typewriter-press { font-family: 'VT323', monospace; letter-spacing: 0.05em; }
+    .font-leorio { font-family: 'Cinzel', serif; letter-spacing: 0.08em; text-transform: uppercase; }
+    .font-lemon-milk { font-family: 'Montserrat', sans-serif; font-weight: 900; letter-spacing: 0.04em; text-transform: uppercase; }
+
+    .bg-cinema {
+      background: radial-gradient(circle at 50% -20%, #1e1b2e 0%, #090a0f 70%, #030407 100%);
+    }
+
+    .cinema-card {
+      background: rgba(15, 17, 23, 0.85);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(212, 175, 55, 0.15);
+      box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.8);
+    }
+
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(20px) scale(0.95); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .animate-toast {
+      animation: toastIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    .grid-guides {
+      background-size: 33.333% 33.333%;
+      background-image: 
+        linear-gradient(to right, rgba(234, 179, 8, 0.3) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(234, 179, 8, 0.3) 1px, transparent 1px);
+    }
+  </style>
+</head>
+<body class="bg-cinema text-slate-100 min-h-screen selection:bg-amber-500 selection:text-black touch-manipulation">
+
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const DEFAULT_PARAGRAPHS = [
+      { id: 1, text: 'ESCENA 1 - INTERIOR NOCHE\n\nEl foco ilumina la escena en penumbra mientras la cámara inicia el travelling.', duration: 6 },
+      { id: 2, text: 'Puedes conectar la cámara de tu teléfono en tiempo real ingresando el código de vinculación WebRTC.', duration: 8 },
+      { id: 3, text: 'Disfruta de latencia mínima y grabación directa en formato cinematográfico.', duration: 6 }
+    ];
+
+    function App() {
+      const [activeTab, setActiveTab] = useState('editor');
+      
+      const [selectedFont, setSelectedFont] = useState(() => localStorage.getItem('tp_font') || 'jmh');
+      const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('tp_fontSize')) || 28);
+      const [paragraphs, setParagraphs] = useState(() => {
+        const saved = localStorage.getItem('tp_paragraphs');
+        return saved ? JSON.parse(saved) : DEFAULT_PARAGRAPHS;
+      });
+
+      const [isContinuousMode, setIsContinuousMode] = useState(() => localStorage.getItem('tp_continuous') === 'true');
+      const [prompterMode, setPrompterMode] = useState(() => localStorage.getItem('tp_prompterMode') || 'typewriter');
+
+      // Estado de Cámara y WebRTC
+      const [cameraSource, setCameraSource] = useState('local');
+      const [isCameraActive, setIsCameraActive] = useState(false);
+      const [showGuides, setShowGuides] = useState(true);
+      const [isRecording, setIsRecording] = useState(false);
+      const [mediaStream, setMediaStream] = useState(null);
+      const [facingMode, setFacingMode] = useState('user');
+
+      // WebRTC PeerJS States
+      const [peerId, setPeerId] = useState('');
+      const [remoteCodeInput, setRemoteCodeInput] = useState('');
+      const [peerConnectionStatus, setPeerConnectionStatus] = useState('disconnected');
+      const [showRemoteModal, setShowRemoteModal] = useState(false);
+
+      const [isFullscreen, setIsFullscreen] = useState(false);
+      const [toast, setToast] = useState(null);
+
+      const [isPlaying, setIsPlaying] = useState(false);
+      const [currentParaIndex, setCurrentParaIndex] = useState(0);
+      const [currentCharIndex, setCurrentCharIndex] = useState(0);
+      const [currentWordIndex, setCurrentWordIndex] = useState(0);
+
+      const paragraphRefs = useRef([]);
+      const timerRef = useRef(null);
+      const wakeLockRef = useRef(null);
+      const continuousTextareaRef = useRef(null);
+      const videoRef = useRef(null);
+      const mediaRecorderRef = useRef(null);
+      const recordedChunksRef = useRef([]);
+      const prompterContainerRef = useRef(null);
+      const peerInstanceRef = useRef(null);
+      const qrRef = useRef(null);
+
+      const triggerToast = (message, type = 'info') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 4000);
+      };
+
+      useEffect(() => localStorage.setItem('tp_font', selectedFont), [selectedFont]);
+      useEffect(() => localStorage.setItem('tp_fontSize', fontSize), [fontSize]);
+      useEffect(() => localStorage.setItem('tp_paragraphs', JSON.stringify(paragraphs)), [paragraphs]);
+      useEffect(() => localStorage.setItem('tp_continuous', isContinuousMode), [isContinuousMode]);
+      useEffect(() => localStorage.setItem('tp_prompterMode', prompterMode), [prompterMode]);
+
+      // Inicialización Robusta de PeerJS
+      useEffect(() => {
+        const randomId = 'CINE-' + Math.floor(1000 + Math.random() * 9000);
+        const peer = new Peer(randomId, {
+          debug: 1,
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' }
+            ]
+          }
+        });
+
+        peer.on('open', (id) => {
+          setPeerId(id);
+        });
+
+        peer.on('error', (err) => {
+          console.error("Error PeerJS:", err);
+          triggerToast("Error de conexión: " + err.type, "warning");
+          setPeerConnectionStatus('disconnected');
+        });
+
+        // Escuchar llamadas entrantes (PC Receptora)
+        peer.on('call', (call) => {
+          call.answer(); // Aceptar llamada entrante
+          call.on('stream', (remoteStream) => {
+            setMediaStream(remoteStream);
+            setCameraSource('remote');
+            setIsCameraActive(true);
+            setActiveTab('presentacion');
+            setPeerConnectionStatus('connected');
+            setShowRemoteModal(false);
+            triggerToast("¡Cámara remota conectada!", "success");
+          });
+
+          call.on('error', (err) => {
+            triggerToast("Error en flujo de video remoto", "warning");
+          });
+        });
+
+        peerInstanceRef.current = peer;
+
+        return () => {
+          if (peerInstanceRef.current) peerInstanceRef.current.destroy();
+        };
+      }, []);
+
+      // Autoconexión por QR
+      useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const connectTo = urlParams.get('connectTo');
+        if (connectTo) {
+          setRemoteCodeInput(connectTo);
+          setShowRemoteModal(true);
+        }
+      }, []);
+
+      // Generación de QR
+      useEffect(() => {
+        if (showRemoteModal && peerId && qrRef.current) {
+          qrRef.current.innerHTML = "";
+          const connectionUrl = `${window.location.href.split('?')[0]}?connectTo=${peerId}`;
+          new QRCode(qrRef.current, {
+            text: connectionUrl,
+            width: 130,
+            height: 130,
+            colorDark: "#f59e0b",
+            colorLight: "#090a0f",
+          });
+        }
+      }, [showRemoteModal, peerId]);
+
+      // Transmisión desde el Móvil hacia la PC
+      const connectAndTransmitRemote = async () => {
+        if (!remoteCodeInput.trim()) {
+          triggerToast("Ingresa un código de sala válido", "warning");
+          return;
+        }
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          triggerToast("Tu navegador bloquea la cámara. Requiere conexión HTTPS.", "warning");
+          return;
+        }
+
+        try {
+          setPeerConnectionStatus('connecting');
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: true
+          });
+
+          setMediaStream(stream);
+          setCameraSource('local');
+          
+          const call = peerInstanceRef.current.call(remoteCodeInput.trim(), stream);
+
+          if (!call) {
+            triggerToast("No se pudo iniciar la llamada. Revisa el código.", "warning");
+            setPeerConnectionStatus('disconnected');
+            return;
+          }
+
+          setPeerConnectionStatus('connected');
+          setIsCameraActive(true);
+          setShowRemoteModal(false);
+          triggerToast("Transmitiendo video a la PC...", "success");
+
+        } catch (err) {
+          console.error("Error al acceder a cámara:", err);
+          setPeerConnectionStatus('disconnected');
+          triggerToast("Acceso denegado a la cámara (requiere HTTPS)", "warning");
+        }
+      };
+
+      // Asignación de Video al Elemento DOM
+      useEffect(() => {
+        if (videoRef.current && mediaStream) {
+          videoRef.current.srcObject = mediaStream;
+          videoRef.current.muted = true; // Evita bloqueo de reproducción automática en móvil
+          videoRef.current.play().catch(err => {
+            console.log("Error al reproducir video:", err);
+          });
+        }
+      }, [mediaStream, isCameraActive, activeTab]);
+
+      const handleIncreaseFont = () => setFontSize(prev => Math.min(prev + 4, 64));
+      const handleDecreaseFont = () => setFontSize(prev => Math.max(prev - 2, 16));
+
+      const handleAddParagraph = () => {
+        setParagraphs([...paragraphs, { id: Date.now(), text: '', duration: 5 }]);
+        triggerToast("Nuevo bloque añadido", "success");
+      };
+
+      const handleUpdateParagraph = (id, field, value) => {
+        setParagraphs(paragraphs.map(p => p.id === id ? { ...p, [field]: value } : p));
+      };
+
+      const handleDeleteParagraph = (id) => {
+        if (paragraphs.length <= 1) {
+          triggerToast("Debes conservar al menos un bloque", "warning");
+          return;
+        }
+        setParagraphs(paragraphs.filter(p => p.id !== id));
+        triggerToast("Bloque eliminado", "info");
+      };
+
+      const handleAddSelectionAsBlock = () => {
+        if (!continuousTextareaRef.current) return;
+        const textarea = continuousTextareaRef.current;
+        const selectedText = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd).trim();
+        
+        if (selectedText) {
+          setParagraphs([...paragraphs, { id: Date.now(), text: selectedText, duration: Math.max(4, Math.ceil(selectedText.length / 15)) }]);
+          triggerToast("¡Selección convertida en bloque!", "success");
+        } else {
+          triggerToast("Selecciona texto con el cursor primero", "warning");
+        }
+      };
+
+      const toggleFullscreen = () => {
+        if (!document.fullscreenElement) {
+          const target = prompterContainerRef.current || document.documentElement;
+          if (target.requestFullscreen) {
+            target.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {
+              triggerToast("Error al activar pantalla completa", "warning");
+            });
+          }
+        } else {
+          if (document.exitFullscreen) {
+            document.exitFullscreen().then(() => setIsFullscreen(false));
+          }
+        }
+      };
+
+      const startLocalCamera = async (mode = facingMode) => {
+        try {
+          if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+          const constraints = {
+            video: { facingMode: mode, width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: true
+          };
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          setMediaStream(stream);
+          setIsCameraActive(true);
+          setCameraSource('local');
+          triggerToast("Cámara local activada", "success");
+        } catch (err) {
+          triggerToast("No se pudo acceder a la cámara (verifica permisos)", "warning");
+        }
+      };
+
+      const stopCamera = () => {
+        if (mediaStream) {
+          mediaStream.getTracks().forEach(track => track.stop());
+          setMediaStream(null);
+        }
+        setIsCameraActive(false);
+        setPeerConnectionStatus('disconnected');
+        if (isRecording) stopRecording();
+        triggerToast("Cámara desactivada", "info");
+      };
+
+      const toggleCameraFacing = () => {
+        const newMode = facingMode === 'user' ? 'environment' : 'user';
+        setFacingMode(newMode);
+        if (isCameraActive && cameraSource === 'local') {
+          startLocalCamera(newMode);
+        }
+      };
+
+      const startRecording = () => {
+        if (!mediaStream) return;
+        recordedChunksRef.current = [];
+        try {
+          let options = {};
+          if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+            options = { mimeType: 'video/webm;codecs=vp9' };
+          } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+            options = { mimeType: 'video/mp4' };
+          }
+
+          const recorder = new MediaRecorder(mediaStream, options);
+          recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+          };
+          recorder.onstop = () => {
+            const ext = options.mimeType && options.mimeType.includes('mp4') ? 'mp4' : 'webm';
+            const blob = new Blob(recordedChunksRef.current, { type: options.mimeType || 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `cineprompter-take-${Date.now()}.${ext}`;
+            a.click();
+            URL.revokeObjectURL(url);
+            triggerToast("Video guardado correctamente", "success");
+          };
+          recorder.start();
+          mediaRecorderRef.current = recorder;
+          setIsRecording(true);
+          triggerToast("Grabando...", "info");
+        } catch (e) {
+          triggerToast("Error al iniciar grabación", "warning");
+        }
+      };
+
+      const stopRecording = () => {
+        if (mediaRecorderRef.current && isRecording) {
+          mediaRecorderRef.current.stop();
+          setIsRecording(false);
+        }
+      };
+
+      useEffect(() => {
+        if (!isPlaying || activeTab !== 'presentacion') {
+          clearInterval(timerRef.current);
+          return;
+        }
+
+        const currentPara = paragraphs[currentParaIndex];
+        if (!currentPara) {
+          setIsPlaying(false);
+          return;
+        }
+
+        if (paragraphRefs.current[currentParaIndex]) {
+          paragraphRefs.current[currentParaIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        const totalChars = currentPara.text.length;
+        const words = currentPara.text.trim().split(/\s+/);
+        const totalWords = words.length;
+
+        if (prompterMode === 'full') {
+          timerRef.current = setTimeout(() => {
+            if (currentParaIndex < paragraphs.length - 1) {
+              setCurrentParaIndex(prev => prev + 1);
+            } else {
+              setIsPlaying(false);
+              triggerToast("Toma finalizada", "info");
+            }
+          }, currentPara.duration * 1000);
+        } else if (prompterMode === 'word-zoom') {
+          const wordIntervalMs = (currentPara.duration * 1000) / Math.max(totalWords, 1);
+          timerRef.current = setInterval(() => {
+            setCurrentWordIndex((prevWord) => {
+              if (prevWord < totalWords - 1) {
+                return prevWord + 1;
+              } else {
+                clearInterval(timerRef.current);
+                if (currentParaIndex < paragraphs.length - 1) {
+                  setCurrentParaIndex(prevIdx => prevIdx + 1);
+                  return 0;
+                } else {
+                  setIsPlaying(false);
+                  triggerToast("Toma finalizada", "info");
+                  return prevWord;
+                }
+              }
+            });
+          }, wordIntervalMs);
+        } else {
+          const charIntervalMs = (currentPara.duration * 1000) / Math.max(totalChars, 1);
+          timerRef.current = setInterval(() => {
+            setCurrentCharIndex((prevChar) => {
+              if (prevChar < totalChars) {
+                return prevChar + 1;
+              } else {
+                clearInterval(timerRef.current);
+                if (currentParaIndex < paragraphs.length - 1) {
+                  setCurrentParaIndex(prevIdx => prevIdx + 1);
+                  return 0;
+                } else {
+                  setIsPlaying(false);
+                  triggerToast("Toma finalizada", "info");
+                  return prevChar;
+                }
+              }
+            });
+          }, charIntervalMs);
+        }
+
+        return () => {
+          clearInterval(timerRef.current);
+          clearTimeout(timerRef.current);
+        };
+      }, [isPlaying, currentParaIndex, activeTab, paragraphs, prompterMode]);
+
+      const handleReset = () => {
+        setIsPlaying(false);
+        setCurrentParaIndex(0);
+        setCurrentCharIndex(0);
+        setCurrentWordIndex(0);
+        triggerToast("Teleprompter reiniciado", "info");
+      };
+
+      const fontClasses = {
+        'jmh': 'font-jmh',
+        'typo-slab': 'font-typo-slab',
+        'typewriter-press': 'font-typewriter-press',
+        'leorio': 'font-leorio',
+        'lemon-milk': 'font-lemon-milk'
+      };
+
+      const currentFontClass = fontClasses[selectedFont] || 'font-jmh';
+
+      return (
+        <div className={`min-h-screen flex flex-col ${currentFontClass}`}>
+          
+          {toast && (
+            <div className="fixed bottom-6 right-6 z-50 animate-toast max-w-[90vw]">
+              <div className="cinema-card border-l-4 border-l-amber-500 rounded-2xl px-4 py-3 flex items-center gap-3 shadow-2xl bg-slate-950/90 text-xs font-sans">
+                <span className="text-base">
+                  {toast.type === 'warning' ? '⚠️' : toast.type === 'success' ? '🎬' : 'ℹ️'}
+                </span>
+                <span className="text-amber-100 font-medium tracking-wide">
+                  {toast.message}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* MODAL DE VINCULACIÓN DE CÁMARA REMOTA */}
+          {showRemoteModal && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 font-sans">
+              <div className="cinema-card max-w-md w-full rounded-2xl p-6 border-amber-500/40 relative space-y-4">
+                <button
+                  onClick={() => setShowRemoteModal(false)}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-white"
+                >
+                  ✕
+                </button>
+
+                <h3 className="text-base font-bold text-amber-400 tracking-wider uppercase text-center">
+                  📱 Vinculación de Cámara Remota
+                </h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                  
+                  {/* OPCIÓN A: RECIBIR EN LA PC */}
+                  <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 text-center space-y-2">
+                    <p className="text-[11px] font-bold text-slate-300">MODO PC (RECEPTOR)</p>
+                    <p className="text-[10px] text-slate-400">Escanea este QR con tu teléfono:</p>
+                    <div className="text-amber-400 font-mono font-bold text-lg bg-black/50 py-1 px-3 rounded-lg inline-block border border-amber-500/30">
+                      {peerId || 'Cargando...'}
+                    </div>
+                    <div ref={qrRef} className="flex justify-center p-2 bg-white rounded-lg w-max mx-auto my-2"></div>
+                  </div>
+
+                  {/* OPCIÓN B: TRANSMITIR DESDE EL TELÉFONO */}
+                  <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 text-center space-y-3 flex flex-col justify-between">
+                    <div>
+                      <p className="text-[11px] font-bold text-slate-300">MODO TELÉFONO (EMISOR)</p>
+                      <p className="text-[10px] text-slate-400 mt-1">Código de la PC:</p>
+                    </div>
+
+                    <input
+                      type="text"
+                      placeholder="Ej: CINE-1234"
+                      value={remoteCodeInput}
+                      onChange={(e) => setRemoteCodeInput(e.target.value.toUpperCase())}
+                      className="bg-black border border-slate-700 rounded-xl px-3 py-2 text-center text-amber-300 font-mono text-sm focus:outline-none focus:border-amber-500 uppercase"
+                    />
+
+                    <button
+                      onClick={connectAndTransmitRemote}
+                      disabled={peerConnectionStatus === 'connecting'}
+                      className="w-full bg-amber-500 hover:bg-amber-400 text-black font-bold py-2 rounded-xl text-xs transition uppercase"
+                    >
+                      {peerConnectionStatus === 'connecting' ? 'Conectando...' : '📡 Transmitir Cámara'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* BARRA SUPERIOR */}
+          <header className="border-b border-amber-500/20 cinema-card sticky top-0 z-40">
+            <div className="max-w-7xl mx-auto px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+              
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/40 flex items-center justify-center text-amber-400 font-bold text-xs">
+                  🎬
+                </div>
+                <h1 className="font-bold text-xs md:text-base tracking-widest text-amber-100 uppercase">
+                  CINEPROMPTER <span className="text-amber-500 text-[10px]">SYNC v3.6</span>
+                </h1>
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                <div className="flex items-center bg-slate-950/80 border border-amber-500/30 px-2 py-1 rounded-xl">
+                  <select
+                    value={selectedFont}
+                    onChange={(e) => setSelectedFont(e.target.value)}
+                    className="bg-transparent text-[11px] text-amber-100 font-sans focus:outline-none cursor-pointer max-w-[100px] md:max-w-none"
+                  >
+                    <option value="jmh" className="bg-slate-900 text-slate-100">JMH Typewriter</option>
+                    <option value="typo-slab" className="bg-slate-900 text-slate-100">Typo Slab</option>
+                    <option value="typewriter-press" className="bg-slate-900 text-slate-100">Typewriter Press</option>
+                    <option value="leorio" className="bg-slate-900 text-slate-100">Leorio</option>
+                    <option value="lemon-milk" className="bg-slate-900 text-slate-100">Lemon Milk</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center bg-slate-950/80 border border-amber-500/30 p-1 rounded-xl text-xs gap-1">
+                  <button onClick={handleDecreaseFont} className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-lg font-bold text-xs">A-</button>
+                  <span className="px-0.5 text-slate-300 font-mono text-[10px] min-w-[22px] text-center">{fontSize}</span>
+                  <button onClick={handleIncreaseFont} className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-lg font-bold text-xs">A+</button>
+                </div>
+
+                <div className="flex bg-slate-950/90 border border-slate-800 p-0.5 rounded-xl text-xs font-sans">
+                  <button
+                    onClick={() => { setIsPlaying(false); setActiveTab('editor'); }}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition text-xs ${activeTab === 'editor' ? 'bg-amber-500 text-black' : 'text-slate-400'}`}
+                  >
+                    ✏️ Guión
+                  </button>
+                  <button
+                    onClick={() => { handleReset(); setActiveTab('presentacion'); }}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition text-xs ${activeTab === 'presentacion' ? 'bg-amber-500 text-black' : 'text-slate-400'}`}
+                  >
+                    🎥 Rodaje
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* ÁREA PRINCIPAL */}
+          <main className="flex-1 w-full mx-auto p-2 sm:p-4 md:p-6 flex flex-col">
+            
+            {activeTab === 'editor' && (
+              <div className="max-w-4xl mx-auto w-full space-y-4">
+                
+                <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center cinema-card p-3 rounded-2xl gap-3">
+                  <div className="flex items-center justify-between sm:justify-start gap-2">
+                    <span className="text-xs font-bold font-sans text-slate-300">Modo:</span>
+                    <button
+                      onClick={() => setIsContinuousMode(!isContinuousMode)}
+                      className={`px-3 py-1 rounded-xl text-xs font-sans font-bold transition border ${
+                        isContinuousMode
+                          ? 'bg-indigo-600 border-indigo-400 text-white'
+                          : 'bg-slate-900 border-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {isContinuousMode ? '📄 Hoja Única' : '🧱 Bloques'}
+                    </button>
+                  </div>
+
+                  {isContinuousMode ? (
+                    <button
+                      onClick={handleAddSelectionAsBlock}
+                      className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-3 py-2 rounded-xl text-xs transition font-sans shadow-lg shadow-amber-500/20 text-center"
+                    >
+                      ➕ Convertir Selección en Bloque
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleAddParagraph}
+                      className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-3 py-2 rounded-xl text-xs transition font-sans shadow-lg shadow-amber-500/20 text-center"
+                    >
+                      + Agregar Bloque
+                    </button>
+                  )}
+                </div>
+
+                {isContinuousMode && (
+                  <div className="cinema-card rounded-2xl p-4 space-y-3">
+                    <textarea
+                      ref={continuousTextareaRef}
+                      defaultValue={paragraphs.map(p => p.text).join('\n\n')}
+                      rows={10}
+                      style={{ fontSize: `${Math.max(14, fontSize * 0.55)}px` }}
+                      className={`w-full bg-slate-950/70 border border-slate-800/80 rounded-xl p-4 text-slate-100 focus:outline-none focus:border-amber-500/60 leading-relaxed resize-y ${currentFontClass}`}
+                      placeholder="Escribe tu guión de forma libre..."
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  {paragraphs.map((p, index) => (
+                    <div key={p.id} className="cinema-card rounded-2xl p-3.5 transition hover:border-amber-500/40">
+                      <div className="flex justify-between items-center mb-2 font-sans">
+                        <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-md">
+                          #{index + 1}
+                        </span>
+
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 px-2 py-0.5 rounded-lg text-xs">
+                            <span className="text-slate-400 text-[10px]">⏱️</span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="300"
+                              value={p.duration}
+                              onChange={(e) => handleUpdateParagraph(p.id, 'duration', Number(e.target.value))}
+                              className="w-8 bg-transparent font-bold text-amber-400 text-center focus:outline-none font-mono text-xs"
+                            />
+                            <span className="text-slate-500 text-[10px]">s</span>
+                          </div>
+
+                          <button
+                            onClick={() => handleDeleteParagraph(p.id)}
+                            className="text-slate-500 hover:text-rose-400 p-1 transition text-xs"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </div>
+
+                      <textarea
+                        value={p.text}
+                        onChange={(e) => handleUpdateParagraph(p.id, 'text', e.target.value)}
+                        rows={2}
+                        style={{ fontSize: `${Math.max(14, fontSize * 0.55)}px` }}
+                        className={`w-full bg-slate-950/60 border border-slate-800/80 rounded-xl p-3 text-slate-100 focus:outline-none focus:border-amber-500/60 transition resize-y ${currentFontClass}`}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'presentacion' && (
+              <div ref={prompterContainerRef} className="flex-1 flex flex-col h-full bg-cinema rounded-2xl overflow-hidden p-2 sm:p-4">
+                
+                {/* CONTROLES */}
+                <div className="cinema-card rounded-2xl p-3 mb-4 flex flex-wrap items-center justify-between gap-2 z-30 border-amber-500/30">
+                  
+                  <div className="flex items-center gap-1 bg-slate-950/80 border border-slate-800 p-1 rounded-xl text-xs font-sans overflow-x-auto">
+                    <button
+                      onClick={() => setPrompterMode('typewriter')}
+                      className={`px-2 py-1 rounded-lg font-semibold text-[11px] ${prompterMode === 'typewriter' ? 'bg-amber-500 text-black' : 'text-slate-400'}`}
+                    >
+                      ⌨️ Máquina
+                    </button>
+                    <button
+                      onClick={() => setPrompterMode('word-zoom')}
+                      className={`px-2 py-1 rounded-lg font-semibold text-[11px] ${prompterMode === 'word-zoom' ? 'bg-amber-500 text-black' : 'text-slate-400'}`}
+                    >
+                      🔍 Zoom
+                    </button>
+                    <button
+                      onClick={() => setPrompterMode('full')}
+                      className={`px-2 py-1 rounded-lg font-semibold text-[11px] ${prompterMode === 'full' ? 'bg-amber-500 text-black' : 'text-slate-400'}`}
+                    >
+                      📜 Bloque
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      onClick={() => setShowRemoteModal(true)}
+                      className="bg-indigo-950/90 border border-indigo-500/40 text-indigo-300 px-3 py-1.5 rounded-xl font-bold text-xs transition font-sans flex items-center gap-1"
+                    >
+                      <span>📲</span>
+                      <span>Vincular Remota</span>
+                    </button>
+
+                    <button
+                      onClick={isCameraActive ? stopCamera : () => startLocalCamera()}
+                      className={`px-3 py-1.5 rounded-xl font-bold text-xs transition font-sans border ${
+                        isCameraActive 
+                          ? 'bg-rose-950/80 border-rose-500/50 text-rose-300' 
+                          : 'bg-slate-900 border-slate-800 text-amber-400'
+                      }`}
+                    >
+                      {isCameraActive ? '🚫 Apagar' : '📷 Cám Local'}
+                    </button>
+
+                    <button
+                      onClick={toggleFullscreen}
+                      className="bg-slate-900 border border-slate-800 text-amber-400 p-1.5 rounded-xl text-xs font-sans font-bold"
+                    >
+                      {isFullscreen ? '✕' : '⛶ Fullscreen'}
+                    </button>
+
+                    <button
+                      onClick={() => setIsPlaying(!isPlaying)}
+                      className="bg-amber-500 hover:bg-amber-400 text-black px-4 py-1.5 rounded-xl font-bold text-xs uppercase transition shadow-lg font-sans"
+                    >
+                      {isPlaying ? '⏸️ PAUSAR' : '▶️ INICIAR'}
+                    </button>
+
+                    <button
+                      onClick={handleReset}
+                      className="bg-slate-950 text-slate-300 p-1.5 rounded-xl text-xs font-semibold border border-slate-800 font-sans"
+                    >
+                      🔄
+                    </button>
+                  </div>
+                </div>
+
+                {/* VISTA DIVIDIDA */}
+                <div className={`flex-1 grid gap-4 w-full ${isCameraActive ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'}`}>
+                  
+                  <div className="flex-1 overflow-y-auto px-2 py-4 space-y-8 max-h-[70vh] md:max-h-[80vh] scroll-smooth">
+                    {paragraphs.map((p, pIdx) => {
+                      const isActive = pIdx === currentParaIndex;
+                      const isPast = pIdx < currentParaIndex;
+                      const words = p.text.trim().split(/\s+/);
+
+                      return (
+                        <div
+                          key={p.id}
+                          ref={(el) => (paragraphRefs.current[pIdx] = el)}
+                          style={{ fontSize: `${fontSize}px` }}
+                          className={`transition-all duration-300 p-4 sm:p-6 rounded-2xl leading-relaxed ${currentFontClass} ${
+                            isActive
+                              ? 'cinema-card border-2 border-amber-500/90 text-amber-300 shadow-2xl scale-[1.02]'
+                              : isPast
+                              ? 'opacity-20 text-slate-600'
+                              : 'opacity-30 text-slate-500'
+                          }`}
+                        >
+                          {isActive ? (
+                            <>
+                              {prompterMode === 'word-zoom' && (
+                                <div className="flex flex-wrap gap-x-2 gap-y-1">
+                                  {words.map((word, wIdx) => (
+                                    <span
+                                      key={wIdx}
+                                      className={`transition-all duration-200 inline-block ${
+                                        wIdx === currentWordIndex
+                                          ? 'text-amber-300 font-extrabold scale-110 underline decoration-amber-500'
+                                          : wIdx < currentWordIndex
+                                          ? 'text-slate-400 opacity-60'
+                                          : 'text-slate-500 opacity-40'
+                                      }`}
+                                    >
+                                      {word}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+
+                              {prompterMode === 'full' && (
+                                <div className="text-amber-200 font-bold">{p.text}</div>
+                              )}
+
+                              {prompterMode === 'typewriter' && (
+                                <>
+                                  {p.text.slice(0, currentCharIndex)}
+                                  <span className="animate-pulse text-amber-400 font-bold ml-1">|</span>
+                                </>
+                              )}
+                            </>
+                          ) : (
+                            p.text
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* VISOR DE CÁMARA */}
+                  {isCameraActive && (
+                    <div className="relative cinema-card rounded-2xl overflow-hidden border border-amber-500/30 min-h-[250px] md:min-h-[400px] flex flex-col justify-between">
+                      
+                      <div className="relative w-full h-full flex-1 bg-black flex items-center justify-center overflow-hidden">
+                        <video
+                          ref={videoRef}
+                          autoPlay
+                          playsInline
+                          muted
+                          className={`w-full h-full object-cover ${facingMode === 'user' && cameraSource === 'local' ? 'scale-x-[-1]' : ''}`}
+                        />
+
+                        {showGuides && <div className="absolute inset-0 grid-guides pointer-events-none" />}
+
+                        {isRecording && (
+                          <div className="absolute top-3 left-3 bg-rose-600/90 text-white text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1.5 animate-pulse font-sans">
+                            <span className="w-2 h-2 rounded-full bg-white"></span>
+                            REC
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-3 bg-slate-950/90 border-t border-slate-800 flex items-center justify-between gap-2 font-sans text-xs">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setShowGuides(!showGuides)}
+                            className={`px-2.5 py-1 rounded-lg font-semibold text-[11px] ${showGuides ? 'bg-amber-500/20 border border-amber-500/40 text-amber-300' : 'bg-slate-900 text-slate-400'}`}
+                          >
+                            📐 Guías
+                          </button>
+                          {cameraSource === 'local' && (
+                            <button
+                              onClick={toggleCameraFacing}
+                              className="px-2.5 py-1 bg-slate-900 border border-slate-800 text-slate-300 rounded-lg text-[11px]"
+                            >
+                              🔄 Rotar
+                            </button>
+                          )}
+                        </div>
+
+                        {isRecording ? (
+                          <button
+                            onClick={stopRecording}
+                            className="bg-rose-600 hover:bg-rose-500 text-white font-bold px-4 py-1.5 rounded-xl text-xs uppercase"
+                          >
+                            ⏹ Detener
+                          </button>
+                        ) : (
+                          <button
+                            onClick={startRecording}
+                            className="bg-rose-600/80 hover:bg-rose-600 text-white font-bold px-4 py-1.5 rounded-xl text-xs uppercase"
+                          >
+                            🔴 Grabar
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
